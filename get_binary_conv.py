@@ -122,3 +122,14 @@ def prep_mat_file():
 
         scipy.io.savemat('C:/Users/User/Documents/MATLAB/EEG_data/' + sbj + '/Envelope.mat', mat_a)
         scipy.io.savemat('C:/Users/User/Documents/MATLAB/EEG_data/' + sbj + '/EEG.mat', mat_e)
+
+from itertools import islice
+import matplotlib.pyplot as plt
+with open('accu.txt', 'r') as f:
+    tro, teo, trt, tet = [], [], [], []
+    for line in islice(f, 2, None):
+        line = line.split(',')
+        tro.append(float(line[0].split()[-1]))
+        teo.append(float(line[1]))
+        trt.append(float(line[2]))
+        tet.append(float(line[3].strip('\n')))
