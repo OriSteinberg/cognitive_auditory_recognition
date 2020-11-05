@@ -99,37 +99,41 @@ def get_data(audio, eeg, audio_unatt=None, idx_sample=None, num_context=1, dct_p
 
 
 def prep_mat_file():
-    dirs = ['s1', 's2']
+    dirs = ['s1']
     for sbj in dirs:
-        loaded_data_audio = scipy.io.loadmat("C:/Users/User/Documents/MATLAB/EEG_data/" + sbj + "/Smat.mat")
-        loaded_data_eeg = scipy.io.loadmat("C:/Users/User/Documents/MATLAB/EEG_data/" + sbj + "/Rmat.mat")
+        loaded_data_audio = scipy.io.loadmat("C:/Py_ws/DL/thesis/data/two_audio/" + sbj + "/pilotVR05_Smat")
+        loaded_data_eeg = scipy.io.loadmat("C:/Py_ws/DL/thesis/data/two_audio/" + sbj + "/pilotVR05_Rmat.mat")
         audio = loaded_data_audio['S'][0]
         eeg = loaded_data_eeg['R'][0]
-        max_len = 0
+        max_len = 99999
         for i in range(len(eeg)):
-            if audio[i].shape[0] > max_len:
+            if audio[i].shape[0] < max_len:
                 max_len = audio[i].shape[0]
         data_a = np.zeros((audio.shape[0], max_len))
+        data_au = np.zeros((audio.shape[0], max_len))
         for i, mat in enumerate(audio):
-            data_a[i] = mat[0]
+            data_a[i] = mat[:max_len, 0]
+            data_au[i] = mat[:max_len, 1]
 
         data_e = np.zeros((audio.shape[0], 64, max_len))
         for i in range(len(eeg)):
             mat = eeg[i].transpose()
-            data_e[i, :64, :mat.shape[1]] = mat
-        mat_a  = {'data': data_a}
+            #data_e[i, :64, :mat.shape[1]] = mat
+            data_e[i] = mat[:, :max_len]
+        mat_a  = {'data': data_a, 'data_unatt': data_au}
         mat_e  = {'data': data_e}
 
-        scipy.io.savemat('C:/Users/User/Documents/MATLAB/EEG_data/' + sbj + '/Envelope.mat', mat_a)
-        scipy.io.savemat('C:/Users/User/Documents/MATLAB/EEG_data/' + sbj + '/EEG.mat', mat_e)
+        scipy.io.savemat('C:/Py_ws/DL/thesis/data/two_audio/' + sbj + '/Envelope.mat', mat_a)
+        scipy.io.savemat('C:/Py_ws/DL/thesis/data/two_audio/' + sbj + '/EEG.mat', mat_e)
 
-from itertools import islice
-import matplotlib.pyplot as plt
-with open('accu.txt', 'r') as f:
-    tro, teo, trt, tet = [], [], [], []
-    for line in islice(f, 2, None):
-        line = line.split(',')
-        tro.append(float(line[0].split()[-1]))
-        teo.append(float(line[1]))
-        trt.append(float(line[2]))
-        tet.append(float(line[3].strip('\n')))
+if False:
+    from itertools import islice
+    import matplotlib.pyplot as plt
+    with open('accu.txt', 'r') as f:
+        tro, teo, trt, tet = [], [], [], []
+        for line in islice(f, 2, None):
+            line = line.split(',')
+            tro.append(float(line[0].split()[-1]))
+            teo.append(float(line[1]))
+            trt.append(float(line[2]))
+            tet.append(float(line[3].strip('\n')))

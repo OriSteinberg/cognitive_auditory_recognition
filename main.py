@@ -5,50 +5,51 @@ import datetime
 from glob import glob
 import sys
 from importlib import reload
-import matplotlib as mpl
-
-mpl.rcParams['pdf.fonttype'] = 42
 
 np.random.seed(0)     # for reproducibility tests
 torch.manual_seed(0)  # for reproducibility tests
 
-Traning = True
-Eval = True
-save_flag = True
+Traning     = True
+Eval        = True
+save_flag   = True
+SHORT       = False
 
-eval_modulo = 1
+eval_modulo = 50
 output_size = 1
 hidden_size = 100
+audio_num   = 1
 
-# batch_size = int(1024) # bce
-batch_size = int(5)
-num_epoch = 2400
+batch_size  = int(128)  # int(1024)
+num_epoch   = 500  # 2400
+num_context = 500  # 1000
+idx_keep_num = 200  # 250
 
 learning_rate = 1e-3
-weight_decay = 0
+weight_decay  = 0
 
 file_path_net           = 'C:/Py_ws/DL/thesis/'                 # XXX_path_to_net
 file_path_name_get_data = 'C:/Py_ws/DL/thesis/get_binary_conv'  # XXX_path_and_name_to_get_data
-num_context             = 1000
 file_name_net           = 'binary_conv'
 loss_type               = 'bce'
+file_path_training      = 'C:/Py_ws/DL/thesis/training'
+subject_dir             = "C:/Py_ws/DL/thesis/data/two_audio/"
+file_path_name_net      = os.path.join(file_path_net, file_name_net)
+subj_folder_list        = [subject_dir + subj for subj in sorted(os.listdir(subject_dir))]
 
-file_path_name_net = os.path.join(file_path_net, file_name_net)
 sys.path.append(os.path.split(file_path_name_get_data)[0])
 module = __import__(os.path.split(file_path_name_get_data)[1])
 reload(module)
 load_data = getattr(module, 'load_data')
 get_data = getattr(module, 'get_data')
 
-file_path_training = 'C:/Py_ws/DL/thesis/training'
 sys.path.append(os.path.split(file_path_training)[0])
 module = __import__(os.path.split(file_path_training)[1])
 reload(module)
 big_node = getattr(module, 'big_node')
 
 # ******************** gathering the data into lists ********************
-subj_dir = "C:/Users/User/Documents/MATLAB/EEG_data/"
-subj_folder_list = [subj_dir + subj for subj in sorted(os.listdir(subj_dir))]
+
+
 file_path_name_audio_list = []
 file_path_name_eeg_list = []
 for subj_folder in subj_folder_list[:1]:
@@ -61,7 +62,7 @@ for subj_folder in subj_folder_list[:1]:
 print(file_path_name_audio_list)
 print(file_path_name_eeg_list)
 
-idx_keep_audioTime = np.sort(np.random.permutation(num_context)[:250])
+idx_keep_audioTime = np.sort(np.random.permutation(num_context)[:idx_keep_num])
 dct_params = {'idx_keep_audioTime': idx_keep_audioTime}
 
 # ******************** Load data ********************
@@ -70,13 +71,14 @@ eval_list = []
 for file_path_name_audio, file_path_name_eeg in zip(file_path_name_audio_list, file_path_name_eeg_list):
     audio, eeg, audio_unatt = load_data(file_path_name_audio, file_path_name_eeg)
     # eeg - [Trails, Channel, Time]   audio/audio_unatt - [Trails, Time]
-    X, y = get_data(audio, eeg, audio_unatt, idx_sample=0, num_context=num_context, dct_params=dct_params)
+    x, y = get_data(audio, eeg, audio_unatt, idx_sample=0, num_context=num_context, dct_params=dct_params)
     # x - [num_time(windows) * 2, channel + 1, num_context\np.size(idx_keep_audioTime)]
     # y - [num_time(windows) * 2, 1]
 
+    set_size = x.size(0)
     full_set = audio.shape[0]  # num of trails
     # groups test suits when at each test we take the next time series
-    eval_list.append([full_set, file_path_name_audio, file_path_name_eeg])
+    eval_list.append([full_set, set_size, file_path_name_audio, file_path_name_eeg])
 
 random_seed_flag = True
 # random_seed_flag = False
@@ -105,12 +107,13 @@ for test_set in eval_list:
                   'idx_keep_audioTime':      idx_keep_audioTime,
                   'random_seed_flag':        random_seed_flag,
                   'eval_flag':               Eval,
-                  'eval_modulo':             eval_modulo}
+                  'eval_modulo':             eval_modulo,
+                  'idx_keep_num':            idx_keep_num,
+                  'channel_num':             channel_num,
+                  'audio_num':               audio_num}
 
-    trails_num = test_set[0]
-    file_path_name_audio, file_path_name_eeg = test_set[1], test_set[2]
     import time
     ts = time.time()
-    big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params)
+    big_node(test_set, dct_params, SHORT)
     te = time.time()
-    print(te - ts)
+    print(f'total time - {te - ts}')

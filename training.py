@@ -10,11 +10,10 @@ import time
 import os
 import sys
 from importlib import reload
-import hashlib
 import nipype
 
 
-def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
+def big_node(test_set, dct_params, SHORT=False):
     """Process data and make predictions.
     1. Unpack parameters, define model, define data
     2. Training loop
@@ -33,7 +32,7 @@ def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
     #      Unpack parameters, define model, define data
     ################################################################
     # Setup the dnn, and create the monolithic block of data that will be used for training.
-
+    trails_num, set_size, file_path_name_audio, file_path_name_eeg = test_set
     num_context        = dct_params['num_context']
     num_epoch          = dct_params['num_epoch']
     save_flag          = dct_params['save_flag']
@@ -41,14 +40,15 @@ def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
     file_path_name_net = dct_params['file_path_name_net']
     batch_size         = dct_params['batch_size']
     loss_type          = dct_params['loss_type']
-    random_seed_flag   = dct_params['random_seed_flag']
     eval_modulo        = dct_params['eval_modulo']
     hidden_size        = dct_params['hidden_size']
     output_size        = dct_params['output_size']
     lr                 = dct_params['learning_rate']
     weight_decay       = dct_params['weight_decay']
     eval_flag          = dct_params['eval_flag']
-    idx_keep_audioTime = dct_params['idx_keep_audioTime']
+    idx_keep_num       = dct_params['idx_keep_num']
+    channel_num        = dct_params['channel_num']
+    audio_num          = dct_params['audio_num']
 
     np.random.seed(0)
     torch.manual_seed(0)
@@ -75,7 +75,7 @@ def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
     reload(module)  # handle case of making changes to the module- forces reload
     NN = getattr(module, 'NN')
 
-    model = NN(0, hidden_size, output_size)
+    model = NN(idx_keep_num, hidden_size, output_size)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     # params = model.state_dict()
 
@@ -89,42 +89,74 @@ def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
     loss_val_history = np.nan * np.zeros(num_epoch)
     model.train()  # Turn on dropout, batchnorm
     # model.eval()
-
-    audio, eeg, audio_unatt = load_data(file_path_name_audio, file_path_name_eeg)
-    x_all, y_all = torch.tensor([]), torch.tensor([])
-    import time
     ts1 = time.time()
-    for idx_sample in range(trails_num):  # todo
-        x, y = get_data(audio, eeg, audio_unatt, idx_sample=idx_sample, num_context=num_context, dct_params=dct_params)
-        if x is not None:
-            x_all, y_all = torch.cat((x_all, x), dim=0), torch.cat((y_all, y), dim=0)
-    te1 = time.time()
-    print(f'\n***** get data - {te1 - ts1} ******\n')
-    set_size = x.size(0)
-    our_accu_lst, thier_accu_lst = [], []
+    if SHORT:
+        print('slim data mode')
+        audio, eeg, audio_unatt = load_data(file_path_name_audio, file_path_name_eeg)
+        x_all, y_all = get_data(audio, eeg, audio_unatt, idx_sample=0, num_context=num_context, dct_params=dct_params)
+    elif not os.path.exists(f'data/x_all_{num_context}_10.tensor'):
+        print(f'data/x_all_{num_context}.tensor not exist, load & process data')
+        audio, eeg, audio_unatt = load_data(file_path_name_audio, file_path_name_eeg)
+        #x_all, y_all = torch.tensor([]), torch.tensor([])
+        x_all, y_all = torch.zeros((set_size * 30, channel_num + audio_num, idx_keep_num)), torch.zeros((set_size * 30, 1))
+        x_tmp, y_tmp = torch.tensor([]), torch.tensor([])
+        for idx_sample in range(trails_num):  # todo
+            if idx_sample > 0 and idx_sample % 10 == 0:
+                torch.save(x_tmp, f'data/x_all_{num_context}_{idx_sample}.tensor')
+                torch.save(y_tmp, f'data/y_all_{num_context}_{idx_sample}.tensor')
+                x_all[set_size * (idx_sample - 10): set_size * idx_sample] = x_tmp
+                y_all[set_size * (idx_sample - 10): set_size * idx_sample] = y_tmp
+                x_tmp, y_tmp = torch.tensor([]), torch.tensor([])
+
+            x, y = get_data(audio, eeg, audio_unatt, idx_sample=idx_sample, num_context=num_context, dct_params=dct_params)
+            if x is not None:
+                x_tmp, y_tmp = torch.cat((x_tmp, x), dim=0), torch.cat((y_tmp, y), dim=0)
+
+        torch.save(x_tmp, f'data/x_all_{num_context}_{idx_sample + 1}.tensor')
+        torch.save(y_tmp, f'data/y_all_{num_context}_{idx_sample + 1}.tensor')
+
+        x_all[set_size * (idx_sample - 10): set_size * (idx_sample + 1)] = x_tmp
+        y_all[set_size * (idx_sample - 10): set_size * (idx_sample + 1)] = y_tmp
+    else:
+        print(f'data/loading x_all_{num_context}.tensor')
+        x_all, y_all = torch.zeros((set_size * 30, channel_num + audio_num, idx_keep_num)), torch.zeros((set_size * 30, 1))
+        for i, banch in enumerate(['10', '20', '30']):
+            print('load ' + banch)
+            x = torch.load(f'data/x_all_{num_context}_{banch}.tensor')
+            y = torch.load(f'data/y_all_{num_context}_{banch}.tensor')
+            x_all[set_size * 10 * i: set_size * 10 * (i + 1)] = x
+            y_all[set_size * 10 * i: set_size * 10 * (i + 1)] = y
+    print(f'\n***** data process time - {time.time() - ts1} ******\n')
+
+    acc_lst = []
+    i = np.random.randint(0, (len(x_all) // set_size) - 8)
+    acc_lst.append(accuracy(model, set_size, x_all[i * set_size: (i + 4) * set_size], y_all[i * set_size: (i + 4) * set_size],
+             x_all[(i + 4) * set_size: (i + 8) * set_size], y_all[(i + 4) * set_size: (i + 8) * set_size], cuda_flag))
+
+    early_stop = False
     for test in range(trails_num - 1):
-        print('\n\n******************* test %d' % test)
-        x_train = torch.cat((x_all[:set_size * test], x_all[set_size * (test + 1):set_size * (trails_num-1)]))
-        y_train = torch.cat((y_all[:set_size * test], y_all[set_size * (test + 1):set_size * (trails_num-1)]))
-        x_test  = x_all[set_size * test: set_size * (test + 1)]
-        y_test  = y_all[set_size * test: set_size * (test + 1)]
-        xval    = x_all[-set_size:]
-        yval    = y_all[-set_size:]
-
-
+        if early_stop:
+            break
+        print('\n******************* test %d' % test)
+        ts_epoch = time.time()
+        if SHORT:
+            x_train, y_train = x_all, y_all
+        else:
+            x_train = torch.cat((x_all[:set_size * test], x_all[set_size * (test + 4):set_size * (trails_num-1)]))
+            y_train = torch.cat((y_all[:set_size * test], y_all[set_size * (test + 4):set_size * (trails_num-1)]))
+        x_test  = x_all[set_size * test: set_size * (test + 4)]
+        y_test  = y_all[set_size * test: set_size * (test + 4)]
+        xval    = x_all[-set_size * 2:]
+        yval    = y_all[-set_size * 2:]
+        print('training load data {}'.format(time.time() - ts_epoch))
+        ts_epoch = time.time()
         ################################################################
         #              Training loop
         ################################################################
         # Iterate over the dataset a fixed number of times or until an early stopping condition is reached.
         # Randomly select a new batch of training at each iteration
-
-        start = time.perf_counter()
+        
         for idx_train in range(num_epoch):
-            if np.mod(idx_train, num_epoch // 5) == 0:
-                end = time.perf_counter()
-                print('epoch %d, Time per epoch %2.5f ticks' % (idx_train, (end - start) / (num_epoch / 10)))
-                start = time.perf_counter()
-
             idx_keep = np.random.permutation(x_train.data.size(0))[:batch_size]
             idx_keep = torch.from_numpy(idx_keep).type('torch.LongTensor')
             x, y = x_train[idx_keep], y_train[idx_keep]
@@ -148,7 +180,8 @@ def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
                 loss_history[idx_train] = loss.data.numpy()
 
                 if loss_history[idx_train] < 0.09:
-                    print("early_stop!")
+                    print("\n\nearly_stop!\n\n")
+                    early_stop = True
                     break
 
                 # Check validation set performance
@@ -173,8 +206,8 @@ def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
                     example_val_y = y.cpu().data.numpy()
                     example_val_yhat = y_att.cpu().data.numpy()
 
-        print('-- done training --')
-        print(datetime.datetime.now())
+        print(f'training run time - {time.time() - ts_epoch}')
+        ts_epoch = time.time()
 
         ################################################################
         #              Evaluation
@@ -182,52 +215,19 @@ def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
         # Test on the train set, then test on the test set.
 
         if eval_flag:
-            x, y = x_train[:set_size], y_train[:set_size]
-            if x is not None:
-                model.eval()
-                if cuda_flag:
-                    y_att = model.forward(x.cuda())
-                else:
-                    y_att = model.forward(x)
-                example_tr_y = y.cpu().data.numpy()
-                example_tr_yhat = y_att.cpu().data.numpy()
-
-            x, y = x_test, y_test
-            if x is not None:
-                model.eval()
-                if cuda_flag:
-                    y_att = model.forward(x.cuda())
-                else:
-                    y_att = model.forward(x)
-                example_te_y = y.cpu().data.numpy()[None, :]
-                example_te_yhat = y_att.cpu().data.numpy()[None, :]
-            else:
-                example_te_y = np.nan
-                example_te_yhat = np.nan
-
-        example_te_y, example_te_yhat = example_te_y.squeeze(), example_te_yhat.squeeze()
-        train_correct_our = sum(np.sign(example_tr_y - 0.5) == np.sign(example_tr_yhat))[0]
-        test_correct_our = sum(np.sign(example_te_y - 0.5) == np.sign(example_te_yhat))
-        print(f'train accuracy - {train_correct_our / len(example_tr_y)}    test accuracy - {test_correct_our / len(example_te_y)}')
-
-        train_correct_thier, test_correct_thier = 0., 0.
-        for i in range(len(example_tr_yhat) // 2):
-            if example_tr_yhat[i] < example_tr_yhat[i + len(example_tr_yhat) // 2]:
-                train_correct_thier += 1.
-            if example_te_yhat[i] < example_te_yhat[i + len(example_te_yhat) // 2]:
-                test_correct_thier += 1.
-        print(f'train accuracy - {train_correct_thier / (len(example_te_y.squeeze()) / 2)}    test accuracy - {test_correct_thier / (len(example_te_y.squeeze()) / 2)}')
-        our_accu_lst.append([train_correct_our / len(example_tr_y), test_correct_our / len(example_te_y)])
-        thier_accu_lst.append([train_correct_thier / (len(example_te_y.squeeze()) / 2), test_correct_thier / (len(example_te_y.squeeze()) / 2)])
+            i = np.random.randint(0, (len(x_train) // set_size) - 4)
+            acc_lst.append(accuracy(model, set_size, x_train[i * set_size: (i + 4) * set_size], y_train[i * set_size: (i + 4) * set_size],
+                     x_test, y_test, cuda_flag))
+        print(f'evaluation run time - {time.time() - ts_epoch}')
 
     ################################################################
     #              Save
     ################################################################
     # Save network parameters and outputs
-    with open('accu.txt', 'w',) as f:
+    with open('accu_%s.txt' % (file_path_name_eeg.split('\\')[0][-2:]), 'w',) as f:
         f.write('test\tour(train, test)\tthier(train, test)\n\n')
-        for i in range(len(our_accu_lst)):
-            accu_str = f'{i} - {our_accu_lst[i][0]}, {our_accu_lst[i][1]}, {thier_accu_lst[i][0]}, {thier_accu_lst[i][1]}\n'
+        for i in range(len(acc_lst)):
+            accu_str = f'{i} - {acc_lst[i][0]}, {acc_lst[i][1]}, {acc_lst[i][2]}, {acc_lst[i][3]}\n'
             f.write(accu_str)
 
     ver_list = []
@@ -240,19 +240,14 @@ def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
                       'file_path_name_audio': file_path_name_audio,
                       'file_path_name_eeg': file_path_name_eeg,
                       'loss_val_history': loss_val_history,
-                      'yValAtt': example_val_y,
-                      'yValHat': example_val_yhat,
-                      'yTrainAtt': example_tr_y,
-                      'yTrainHat': example_tr_yhat,
-                      'yTestAtt': example_te_y,
-                      'yTestHat': example_te_yhat,
+                      'acc_lst': acc_lst,
                       'subjID': file_path_name_audio.split('\\')[0][-2:],
                       'ver_list': ver_list
                       },
                    **dct_params}
 
         hashstr = ''
-        for key, val in {**{'train': train}, **dct_params}.items():
+        for key, val in {**dct_params}.items():
             if type(val) is str:
                 hashstr = hashstr + key + val
             elif type(val) in [float, int]:
@@ -262,18 +257,18 @@ def big_node(trails_num, file_path_name_audio, file_path_name_eeg, dct_params):
                     hashstr = hashstr + key + ','.join(val)
                 elif type(val[0]) in [float, int]:
                     hashstr = hashstr + key + ','.join([str(i) for i in val])
-        hexstamp = hashlib.md5(hashstr.encode('utf')).hexdigest()
 
-        now_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-        file_path_name_checkpoint = os.path.join(file_path_save, 'checkpoint_eeg2env_%s_%s.pt' % (hexstamp, now_str))
+        now_str = datetime.datetime.now().strftime('%Y%m%d%H%M')
+        file_path_name_checkpoint = os.path.join(file_path_save, 'checkpoint_eeg2env_%s.pt' % now_str)
         torch.save({'state_dict': model.state_dict()}, file_path_name_checkpoint)
+        torch.save(model.state_dict(), file_path_name_checkpoint)
 
         print(file_path_name_checkpoint)
         # Replace all None elements of dict with NaN before saving to avoid save fail.
         for key, val in dct_all.items():
             if val is None:
                 dct_all[key] = np.nan
-        scipy.io.savemat(os.path.join(file_path_save, 'checkpoint_eeg2env_%s_%s.mat' % (hexstamp, now_str)), dct_all)
+        scipy.io.savemat(os.path.join(file_path_save, 'checkpoint_eeg2env_%s.mat' % now_str), dct_all)
     return None
 
 
@@ -283,3 +278,50 @@ def closs(x, y):
     num = 1. / x.numel() * torch.dot(x - xbar, y - ybar)
     denom = torch.std(x) * torch.std(y)
     return -num / denom
+
+
+def accuracy(model, set_size, x_train, y_train, x_test, y_test, cuda_flag=False):
+    train_correct_our, test_correct_our = 0., 0.
+    train_correct_thier, test_correct_thier = 0., 0.
+    for i in range(4):  # len(x_train) // set_size):
+        x, y = x_train[set_size * i:set_size * (i + 1)], y_train[set_size * i:set_size * (i + 1)]
+        if x is not None:
+            model.eval()
+            if cuda_flag:
+                y_att = model.forward(x.cuda())
+            else:
+                y_att = model.forward(x)
+            example_tr_y = y.cpu().data.numpy()
+            example_tr_yhat = y_att.cpu().data.numpy()
+
+        train_correct_our += sum(np.sign(example_tr_y - 0.5) == np.sign(example_tr_yhat))[0]
+        for j in range((set_size // 2) - 1):
+            if example_tr_yhat[j] < example_tr_yhat[j + (set_size // 2)]:
+                train_correct_thier += 1.
+
+    for i in range(4):  # len(x_test) // set_size):
+        x, y = x_test[set_size * i:set_size * (i + 1)], y_test[set_size * i:set_size * (i + 1)]
+        if x is not None:
+            model.eval()
+            if cuda_flag:
+                y_att = model.forward(x.cuda())
+            else:
+                y_att = model.forward(x)
+            example_te_y = y.cpu().data.numpy().squeeze()
+            example_te_yhat = y_att.cpu().data.numpy().squeeze()
+        else:
+            example_te_y = np.nan
+            example_te_yhat = np.nan
+
+        test_correct_our += sum(np.sign(example_te_y - 0.5) == np.sign(example_te_yhat))
+        for j in range((set_size // 2) - 1):
+            if example_te_yhat[j] < example_te_yhat[j + (set_size // 2)]:
+                test_correct_thier += 1.
+
+    print('our: train accuracy - %.3f    test accuracy - %.3f' % (
+        train_correct_our / (set_size * 4), test_correct_our / (set_size * 4)))
+    print('their: train accuracy - %.3f    test accuracy - %.3f' % (
+        train_correct_thier / (set_size * 2),
+        test_correct_thier / (set_size * 2)))
+
+    return train_correct_our, test_correct_our, train_correct_thier, test_correct_thier
