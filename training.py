@@ -10,11 +10,11 @@ import time
 import os
 import sys
 from importlib import reload
-import hashlib
-import nipype
+LOAD_NUM = 5
+TEST_LEN = 1
 
 
-def big_node(train, test, file_path_name_audio, file_path_name_eeg, dct_params):
+def big_node(model, test_set, dct_params):
     """Process data and make predictions.
     1. Unpack parameters, define model, define data
     2. Training loop
@@ -33,34 +33,24 @@ def big_node(train, test, file_path_name_audio, file_path_name_eeg, dct_params):
     #      Unpack parameters, define model, define data
     ################################################################
     # Setup the dnn, and create the monolithic block of data that will be used for training.
-
+    trails_num, set_size, file_path_name_audio, file_path_name_eeg = test_set
     num_context        = dct_params['num_context']
     num_epoch          = dct_params['num_epoch']
     save_flag          = dct_params['save_flag']
     file_path_save     = dct_params['file_path_save']
-    file_path_name_net = dct_params['file_path_name_net']
     batch_size         = dct_params['batch_size']
     loss_type          = dct_params['loss_type']
-    idx_split          = dct_params['idx_split']
-    random_seed_flag   = dct_params['random_seed_flag']
     eval_modulo        = dct_params['eval_modulo']
-    #input_size         = dct_params['data_prod_num']
-    hidden_size        = dct_params['hidden_size']
-    output_size        = dct_params['output_size']
     lr                 = dct_params['learning_rate']
     weight_decay       = dct_params['weight_decay']
-    trails_num         = dct_params['trails_num']
+    eval_flag          = dct_params['eval_flag']
 
-    if random_seed_flag:
-        np.random.seed(idx_split)
-        torch.manual_seed(idx_split)
-    else:
-        np.random.seed(0)
-        torch.manual_seed(0)
+    np.random.seed(0)
+    torch.manual_seed(0)
+
     torch.backends.cudnn.deterministic = True
-    if False:  # torch.cuda.is_available():
+    if torch.cuda.is_available():
         cuda_flag = True
-        model.cuda()
         print('Using CUDA')
     else:
         print('No CUDA')
@@ -73,13 +63,9 @@ def big_node(train, test, file_path_name_audio, file_path_name_eeg, dct_params):
     reload(module)
     get_data = getattr(module, 'get_data')
     load_data = getattr(module, 'load_data')
-    # path to folder containing the class.py module
-    sys.path.append(os.path.split(file_path_name_net)[0])
-    module = __import__(os.path.split(file_path_name_net)[1])
-    reload(module)  # handle case of making changes to the module- forces reload
-    NN = getattr(module, 'NN')
 
-    model = NN(input_size, hidden_size, output_size)
+    if cuda_flag:
+        model.cuda()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     # params = model.state_dict()
 
@@ -93,173 +79,120 @@ def big_node(train, test, file_path_name_audio, file_path_name_eeg, dct_params):
     loss_val_history = np.nan * np.zeros(num_epoch)
     model.train()  # Turn on dropout, batchnorm
     # model.eval()
+    audio, eeg, audio_unatt = load_data(file_path_name_audio)
+    data_set = audio, eeg, audio_unatt
 
-    # Comment out in order to have the same val set and therefore the same train set between runs
-    # train = np.asarray(train)[np.random.permutation(len(train))].tolist()
-    if 1:
-        valset = train[-2:]
-        train = train[:-2]
-    else:
-        valset = []
-    audio, eeg, audio_unatt = load_data(file_path_name_audio, file_path_name_eeg)
-    x_all, y_all = torch.tensor([]), torch.tensor([])
+    acc_lst = []
+    early_stop = False
+    for test in range((trails_num // LOAD_NUM)):
+        if early_stop:
+            acc_lst.append(
+                accuracy(model, data_set, dct_params, get_data, num_context, train_idx=dev_idxes, test_idx=test_idxes))
+            break
+        print('\n******************* test %d' % test)
 
-    #####################################################################
-    #####################################################################
-    for idx_sample in train[:3]:  # todo
-        x, y = get_data(audio, eeg, audio_unatt, idx_sample=idx_sample, num_context=num_context, dct_params=dct_params)
-        if x is not None:
-            x_all, y_all = torch.cat((x_all, x), dim=0), torch.cat((y_all, y), dim=0)
-    set_size = x.size(0)
-    for test in range(trails_num):
-        x_train = torch.cat((x_all[:set_size * test], x_all[set_size * (test + 1):]))
-        x_test = x_all[set_size * test: set_size * (test + 1)]
+        ################################################################
+        #              Data loading
+        ################################################################
+        ts = time.time()
+        train_idxes = np.arange(LOAD_NUM) + (test * LOAD_NUM)
+        dev_idxes = np.random.permutation(train_idxes)[:TEST_LEN]
+        test_idxes = np.arange(TEST_LEN)
+        if ((test + 1) * LOAD_NUM) + TEST_LEN < trails_num:
+            test_idxes += ((test + 1) * LOAD_NUM)
 
-        # Outside the loop to only form conv matrix once
-        xval, yval = get_data(audio, eeg, audio_unatt, idx_sample=valset[0], num_context=num_context, dct_params=dct_params)
-        # xval, yval = torch.tensor([]), torch.tensor([])
-        # for idx_sample in valset:
-        #    x, y = get_data(audio, eeg, audio_unatt, idx_sample=idx_sample, num_context=num_context, dct_params=dct_params)
-        #     if x is not None:
-        #         xval, yval = torch.cat((xval, x), dim=0), torch.cat((yval, y), dim=0)
+        x_all, y_all = torch.tensor([]), torch.tensor([])
+        for idx_sample in train_idxes:  #
+            x, y = get_data(audio, eeg, audio_unatt, idx_sample=idx_sample, num_context=num_context,
+                            dct_params=dct_params)
+            if x is not None:
+                x_all, y_all = torch.cat((x_all, x), dim=0), torch.cat((y_all, y), dim=0)
 
+        if cuda_flag:
+            x_all = x_all.cuda()
+            y_all = y_all.cuda()
+        div_idx = int(x_all.size(0) * 0.9)
+        x_train, y_train = x_all[:div_idx], y_all[:div_idx]
+        xval, yval = x_all[div_idx:], y_all[div_idx:]
+        print('loading time - {}, example num - {}'.format(time.time() - ts, x_all.size(0)))
+        ################################################################
+        #              Training loop
+        ################################################################
+        # Iterate over the dataset a fixed number of times or until an early stopping condition is reached.
+        # Randomly select a new batch of training at each iteration
+        for i in range(4):
+            ts_epoch = time.time()
+            acc_lst.append(
+                accuracy(model, data_set, dct_params, get_data, num_context, train_idx=dev_idxes, test_idx=test_idxes))
+            print('accuracy time - {}'.format(time.time() - ts))
+            ts_epoch = time.time()
+            for idx_train in range(num_epoch):
+                idx_keep = np.random.permutation(x_train.size(0))[:batch_size]
+                idx_keep = torch.from_numpy(idx_keep).type('torch.LongTensor')
+                x, y = x_train[idx_keep], y_train[idx_keep]
+                # x = x + Variable(0. * torch.randn(x.shape))    # Data augmentation via noise
 
-    ################################################################
-    #              Training loop
-    ################################################################
-    # Iterate over the dataset a fixed number of times or until an early stopping condition is reached.
-    # Randomly select a new batch of training at each iteration
-
-    start = time.perf_counter()
-    t_start = datetime.datetime.now()
-    for idx_train in range(num_epoch):
-        if np.mod(idx_train, num_epoch / 10) == 0:
-            end = time.perf_counter()
-            t_end = datetime.datetime.now()
-            print('epoch %d, Time per epoch %2.5f ticks' % (idx_train, (end - start) / (num_epoch / 10)))
-            print((t_end - t_start) / (num_epoch / 10))
-            start = time.perf_counter()
-            t_start = datetime.datetime.now()
-
-        idx_keep = np.random.permutation(x_all.data.size(0))[:batch_size]
-        idx_keep = torch.from_numpy(idx_keep).type('torch.LongTensor')
-        x, y = x_all[idx_keep], y_all[idx_keep]
-        # x = x + Variable(0. * torch.randn(x.shape))    # Data augmentation via noise
-
-        if x is not None:
-            model.zero_grad()
-            if cuda_flag:
-                y = y.cuda()
-                output = model.forward(x.cuda())
-            else:
+                model.zero_grad()
                 output = model.forward(x)
 
-            loss = loss_fn(output.view(-1), y.view(-1))
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                loss = loss_fn(output.view(-1), y.view(-1))
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            if cuda_flag:
-                loss = loss.cpu()
-            loss_history[idx_train] = loss.data.numpy()
+                loss_history[idx_train] = loss.cpu().data.numpy()
 
-            if loss_history[idx_train] < 0.09:
-                print("early_stop!")
-                break
+                if False: #loss_history[idx_train] < 0.09:
+                    print("\n\nearly_stop!\n\n")
+                    early_stop = True
+                    break
 
-            # Check validation set performance
-            if (len(valset) > 0) and (np.mod(idx_train, eval_modulo) == 0):
-                model.eval()
+                # Check validation set performance
+                if (len(xval) > 0) and (np.mod(idx_train, eval_modulo) == 0):
+                    model.eval()
 
-                idx_keep = np.sort(np.random.permutation(xval.data.size(0))[:batch_size])
-                idx_keep = torch.from_numpy(idx_keep).type('torch.LongTensor')
-                x = xval[idx_keep]
-                y = yval[idx_keep]
+                    idx_keep = np.sort(np.random.permutation(xval.size(0))[:batch_size])
+                    idx_keep = torch.from_numpy(idx_keep).type('torch.LongTensor')
+                    x, y = xval[idx_keep], yval[idx_keep]
 
-                if cuda_flag:
-                    y_att = model.forward(x.cuda())
-                    stat_1 = loss_fn(y_att.view(-1), y.cuda().view(-1))
-                else:
                     y_att = model.forward(x)
                     stat_1 = loss_fn(y_att.view(-1), y.view(-1))
-                    stat_1 = stat_1.data.numpy()
-                loss_val_history[idx_train // eval_modulo] = stat_1
-                model.train()
+                    stat_1 = stat_1.cpu().data.numpy()
+                    loss_val_history[idx_train // eval_modulo] = stat_1
+                    model.train()
 
-                example_val_y = y.cpu().data.numpy()
-                example_val_yhat = y_att.cpu().data.numpy()
+            print(f'training run time - {time.time() - ts_epoch}')
 
-    print('-- done training --')
-    print(datetime.datetime.now())
-
-    ################################################################
-    #              Evaluation
-    ################################################################
-    # Test on the train set, then test on the test set.
-
-    if True:
-        example_tr_y = []
-        example_tr_yhat = []
-        for idx_tr in train[:1]:
-            x, y = get_data(audio, eeg, audio_unatt, idx_sample=idx_tr, num_context=num_context, dct_params=dct_params)
-            if x is not None:
-                model.eval()
-                if cuda_flag:
-                    y_att = model.forward(x.cuda())
-                else:
-                    y_att = model.forward(x)
-                example_tr_y.append(y.cpu().data.numpy())
-                example_tr_yhat.append(y_att.cpu().data.numpy())
-
-    if True:
-        x, y = get_data(audio, eeg, audio_unatt, idx_sample=test[0], num_context=num_context, dct_params=dct_params)
-
-        if x is not None:
-            model.eval()
-            if cuda_flag:
-                y_att = model.forward(x.cuda())
-            else:
-                y_att = model.forward(x)
-            example_te_y = y.cpu().data.numpy()[None, :]
-            example_te_yhat = y_att.cpu().data.numpy()[None, :]
-        else:
-            example_te_y = np.nan
-            example_te_yhat = np.nan
-
-    train_correct = sum(np.sign(example_tr_y[0]-0.5) == np.sign(example_tr_yhat[0]))[0]
-    test_correct = sum(np.sign(example_te_y.squeeze()-0.5) == np.sign(example_te_yhat.squeeze()))
-    print(f'train accuracy - {train_correct}/{len(example_tr_y[0])} = {train_correct/len(example_tr_y[0])}')
-    print(f'test accuracy - {test_correct}/{len(example_te_y.squeeze())} = {test_correct/len(example_te_y.squeeze())}')
-
+    acc_lst.append(
+        accuracy(model, data_set, dct_params, get_data, num_context, train_idx=dev_idxes, test_idx=test_idxes))
     ################################################################
     #              Save
     ################################################################
     # Save network parameters and outputs
+    with open('accu_%s.txt' % (file_path_name_eeg.split('\\')[0][-2:]), 'w',) as f:
+        f.write('test\tour(train, test)\tthier(train, test)\n\n')
+        for i in range(len(acc_lst)):
+            accu_str = f'{i} - {acc_lst[i][0]}, {acc_lst[i][1]}, {acc_lst[i][2]}, {acc_lst[i][3]}\n'
+            f.write(accu_str)
 
     ver_list = []
-    for v in [torch, np, scipy, nipype]:
+    for v in [torch, np, scipy]:
         ver_list.append(v.__name__ + "_" + v.__version__)
     ver_list.append('python_' + sys.version)
-
+    subject = file_path_name_audio.split('\\')[-1][:2]
     if save_flag:
-        dct_all = {**{'loss': loss_history, 'train': train, 'test': test,
+        dct_all = {**{'loss': loss_history, 'test': test,
                       'file_path_name_audio': file_path_name_audio,
                       'file_path_name_eeg': file_path_name_eeg,
-                      'valset': valset,
                       'loss_val_history': loss_val_history,
-                      'yValAtt': example_val_y,
-                      'yValHat': example_val_yhat,
-                      'yTrainAtt': example_tr_y,
-                      'yTrainHat': example_tr_yhat,
-                      'yTestAtt': example_te_y,
-                      'yTestHat': example_te_yhat,
-                      'subjID': file_path_name_audio.split('\\')[0][-2:],
+                      'acc_lst': acc_lst,
+                      'subjID': subject,
                       'ver_list': ver_list
                       },
                    **dct_params}
 
         hashstr = ''
-        for key, val in {**{'train': train}, **dct_params}.items():
+        for key, val in {**dct_params}.items():
             if type(val) is str:
                 hashstr = hashstr + key + val
             elif type(val) in [float, int]:
@@ -269,18 +202,17 @@ def big_node(train, test, file_path_name_audio, file_path_name_eeg, dct_params):
                     hashstr = hashstr + key + ','.join(val)
                 elif type(val[0]) in [float, int]:
                     hashstr = hashstr + key + ','.join([str(i) for i in val])
-        hexstamp = hashlib.md5(hashstr.encode('utf')).hexdigest()
 
-        now_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-        file_path_name_checkpoint = os.path.join(file_path_save, 'checkpoint_eeg2env_%s_%s.pt' % (hexstamp, now_str))
-        torch.save({'state_dict': model.state_dict()}, file_path_name_checkpoint)
+        now_str = datetime.datetime.now().strftime('%Y%m%d%H%M')
+        file_path_name_checkpoint = os.path.join(file_path_save, subject + '_eeg2env_%s.pt' % now_str)
+        torch.save(model.state_dict(), file_path_name_checkpoint)
 
         print(file_path_name_checkpoint)
         # Replace all None elements of dict with NaN before saving to avoid save fail.
         for key, val in dct_all.items():
             if val is None:
                 dct_all[key] = np.nan
-        scipy.io.savemat(os.path.join(file_path_save, 'checkpoint_eeg2env_%s_%s.mat' % (hexstamp, now_str)), dct_all)
+        scipy.io.savemat(os.path.join(file_path_save, subject + '_eeg2env_%s.mat' % now_str), dct_all)
     return None
 
 
@@ -290,3 +222,79 @@ def closs(x, y):
     num = 1. / x.numel() * torch.dot(x - xbar, y - ybar)
     denom = torch.std(x) * torch.std(y)
     return -num / denom
+
+
+def accuracy(model, data_set, dct_params, get_data, num_context, train_idx, test_idx):
+    audio, eeg, audio_unatt = data_set
+    train_correct_our, test_correct_our = 0., 0.
+    train_correct_thier, test_correct_thier = 0., 0.
+    all_train, all_test = 0., 0.
+    for idx_sample in train_idx:
+        x, y = get_data(audio, eeg, audio_unatt, idx_sample=idx_sample, num_context=num_context, dct_params=dct_params)
+        set_size = x.size(0)
+        if x is not None:
+            model.eval()
+            y_att = model.forward(x)
+            example_tr_y = y.cpu().data.numpy()
+            example_tr_yhat = y_att.cpu().data.numpy()
+            all_train += len(y_att)
+
+            train_correct_our += sum(np.sign(example_tr_y - 0.5) == np.sign(example_tr_yhat))[0]
+            for j in range((set_size // 2) - 1):
+                if example_tr_yhat[j] < example_tr_yhat[j + (set_size // 2)]:
+                    train_correct_thier += 1.
+
+    for idx_sample in test_idx:  # len(x_test) // set_size):
+        x, y = get_data(audio, eeg, audio_unatt, idx_sample=idx_sample, num_context=num_context, dct_params=dct_params)
+        set_size = x.size(0)
+        if x is not None:
+            model.eval()
+            y_att = model.forward(x)
+            example_te_y = y.cpu().data.numpy().squeeze()
+            example_te_yhat = y_att.cpu().data.numpy().squeeze()
+            all_test += len(y_att)
+
+            test_correct_our += sum(np.sign(example_te_y - 0.5) == np.sign(example_te_yhat))
+            for j in range((set_size // 2) - 1):
+                if example_te_yhat[j] < example_te_yhat[j + (set_size // 2)]:
+                    test_correct_thier += 1.
+    tro, teo = train_correct_our / all_train, test_correct_our / all_test
+    trt, tet = train_correct_thier / (all_train / 2), test_correct_thier / (all_test / 2)
+    print('our: train accuracy - %.3f    test accuracy - %.3f' % (tro, teo))
+    print('their: train accuracy - %.3f    test accuracy - %.3f' % (trt, tet))
+    return tro, teo, trt, tet
+
+
+def save_mat_as_tensore(dct_params, file_path_name_audio, file_path_name_eeg, trails_num, load_data, get_data):
+    num_context = dct_params['num_context']
+    ONE_MAT_FILE = dct_params['one_mat_flag']
+    subject = file_path_name_audio.split('\\')[-1][:2]
+    print(subject + f'/x_all_{num_context}_10.tensor not exist, load & process data')
+
+    audio, eeg, audio_unatt = load_data(file_path_name_audio)
+    x_tmp, y_tmp = torch.tensor([]), torch.tensor([])
+    for idx_sample in range(trails_num):
+        if idx_sample > 0 and idx_sample % 10 == 0:
+            torch.save(x_tmp, subject + f'/x_all_{num_context}_{idx_sample}.tensor')
+            torch.save(y_tmp, subject + f'/y_all_{num_context}_{idx_sample}.tensor')
+            x_tmp, y_tmp = torch.tensor([]), torch.tensor([])
+
+        x, y = get_data(audio, eeg, audio_unatt, idx_sample=idx_sample, num_context=num_context, dct_params=dct_params)
+        if x is not None:
+            x_tmp, y_tmp = torch.cat((x_tmp, x), dim=0), torch.cat((y_tmp, y), dim=0)
+
+        torch.save(x_tmp, subject + f'/x_all_{num_context}_{idx_sample + 1}.tensor')
+        torch.save(y_tmp, subject + f'/y_all_{num_context}_{idx_sample + 1}.tensor')
+
+
+def load_tensor_mat(file_path_name_audio, num_context):
+    print(f'loading - data/x_all_{num_context}.tensor')
+    x_all, y_all = torch.tensor([]), torch.tensor([])
+    #x_sets = sorted(os.listdir(subject, 'x_all*'))
+    #y_sets = sorted(glob(os.path.join(subject, 'y_all*')))
+    for i, banch in enumerate(['10', '20', '28']):
+        print('load ' + banch)
+        x = torch.load(subject + f'/x_all_{num_context}_{banch}.tensor')
+        y = torch.load(subject + f'/y_all_{num_context}_{banch}.tensor')
+        x_all = torch.cat((x_all, x), dim=0)
+        y_all = torch.cat((y_all, y), dim=0)

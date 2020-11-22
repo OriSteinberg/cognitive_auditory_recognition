@@ -2,21 +2,24 @@ import scipy.io
 import numpy as np
 import torch
 from torch.autograd import Variable
+import mat73
 
 
-def load_data(file_path_name_audio, file_path_name_eeg):
+def load_data(file_path_name_audio, file_path_name_eeg=False):
     """Return attended audio, eeg, and unattended audio from *.mat file.
     """
+    if not file_path_name_eeg:
+        eeg, audio, audio_unatt = short_prep_mat(file_path_name_audio)
+    else:
+        loaded_data_audio = scipy.io.loadmat(file_path_name_audio)
+        loaded_data_eeg = scipy.io.loadmat(file_path_name_eeg)
 
-    loaded_data_audio = scipy.io.loadmat(file_path_name_audio)
-    loaded_data_eeg = scipy.io.loadmat(file_path_name_eeg)
-
-    audio = loaded_data_audio['data']
-    eeg = loaded_data_eeg['data']
-    eeg = eeg[:, :64, :]
-    audio_unatt = loaded_data_audio['data_unatt']
-    # eeg - [trails, 64, time]
-    # audio, audio_unatt - [trails, time]
+        audio = loaded_data_audio['data']
+        eeg = loaded_data_eeg['data']
+        eeg = eeg[:, :64, :]
+        audio_unatt = loaded_data_audio['data_unatt']
+        # eeg - [trails, 64, time]
+        # audio, audio_unatt - [trails, time]
     return audio, eeg, audio_unatt
 
 
@@ -99,26 +102,71 @@ def get_data(audio, eeg, audio_unatt=None, idx_sample=None, num_context=1, dct_p
 
 
 def prep_mat_file():
-    dirs = ['s1', 's2']
+    dirs = ['s2']
+    folder = 'C:/Py_ws/DL/thesis/data/two_audio_selective/'
     for sbj in dirs:
-        loaded_data_audio = scipy.io.loadmat("C:/Users/User/Documents/MATLAB/EEG_data/" + sbj + "/Smat.mat")
-        loaded_data_eeg = scipy.io.loadmat("C:/Users/User/Documents/MATLAB/EEG_data/" + sbj + "/Rmat.mat")
+        loaded_data_audio = scipy.io.loadmat(folder + sbj + "/pilotVR05_Smat")
+        loaded_data_eeg = scipy.io.loadmat(folder + sbj + "/pilotVR05_Rmat.mat")
         audio = loaded_data_audio['S'][0]
         eeg = loaded_data_eeg['R'][0]
-        max_len = 0
+        max_len = 99999
         for i in range(len(eeg)):
-            if audio[i].shape[0] > max_len:
+            if audio[i].shape[0] < max_len:
                 max_len = audio[i].shape[0]
         data_a = np.zeros((audio.shape[0], max_len))
+        data_au = np.zeros((audio.shape[0], max_len))
         for i, mat in enumerate(audio):
-            data_a[i] = mat[0]
+            data_a[i] = mat[:max_len, 0]
+            data_au[i] = mat[:max_len, 1]
 
         data_e = np.zeros((audio.shape[0], 64, max_len))
         for i in range(len(eeg)):
             mat = eeg[i].transpose()
-            data_e[i, :64, :mat.shape[1]] = mat
-        mat_a  = {'data': data_a}
+            data_e[i] = mat[:, :max_len]
+        mat_a  = {'data': data_a, 'data_unatt': data_au}
         mat_e  = {'data': data_e}
 
-        scipy.io.savemat('C:/Users/User/Documents/MATLAB/EEG_data/' + sbj + '/Envelope.mat', mat_a)
-        scipy.io.savemat('C:/Users/User/Documents/MATLAB/EEG_data/' + sbj + '/EEG.mat', mat_e)
+        scipy.io.savemat('C:/Py_ws/DL/thesis/data/two_audio/' + sbj + '/Envelope.mat', mat_a)
+        scipy.io.savemat('C:/Py_ws/DL/thesis/data/two_audio/' + sbj + '/EEG.mat', mat_e)
+
+
+def prep_mat_file_v2():
+    dirs = ['s2']
+    folder = 'C:/Py_ws/DL/thesis/data/two_audio_selective/'
+    for sbj in dirs:
+        filepath = folder + sbj + "/s2_r_s.mat"
+        data_dict = mat73.loadmat(filepath)
+        audio = data_dict['S_ds']
+        eeg = data_dict['R_ds']
+
+        data_a = []
+        data_au = []
+        for i, mat in enumerate(audio):
+            data_a.append(mat[:, 0])
+            data_au.append(mat[:, 1])
+
+        data_e = []
+        for i in range(len(eeg)):
+            mat = eeg[i].transpose()
+            data_e.append(mat)
+        mat_a  = {'data': data_a, 'data_unatt': data_au}
+        mat_e  = {'data': [data_e]}
+
+        scipy.io.savemat(folder + sbj + '/Envelope.mat', mat_a)
+        scipy.io.savemat(folder + sbj + '/EEG.mat', mat_e)
+
+
+def short_prep_mat(filename):
+    data_dict = mat73.loadmat(filename)
+    audio = data_dict['S_ds']
+    eeg = data_dict['R_ds']
+    data_a, data_au = [], []
+    for i, mat in enumerate(audio):
+        data_a.append(mat[:, 0])
+        data_au.append(mat[:, 1])
+
+    data_e = []
+    for i in range(len(eeg)):
+        mat = eeg[i].transpose()
+        data_e.append(mat)
+    return data_e, data_a, data_au
