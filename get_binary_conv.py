@@ -5,25 +5,26 @@ from torch.autograd import Variable
 import mat73
 
 
-def load_data(file_path_name_audio, file_path_name_eeg=False):
+def load_data(file_path_name_audio, file_path_name_eeg=False, NORM=True):
     """Return attended audio, eeg, and unattended audio from *.mat file.
     """
     if not file_path_name_eeg:
-        eeg, audio, audio_unatt = short_prep_mat(file_path_name_audio)
+        eeg, audio, audio_unatt = short_prep_mat(file_path_name_audio, NORM)
     else:
         loaded_data_audio = scipy.io.loadmat(file_path_name_audio)
         loaded_data_eeg = scipy.io.loadmat(file_path_name_eeg)
 
         audio = loaded_data_audio['data']
         eeg = loaded_data_eeg['data']
-        eeg = eeg[:, :64, :]
+        # eeg = eeg[:, :64, :]
         audio_unatt = loaded_data_audio['data_unatt']
         # eeg - [trails, 64, time]
         # audio, audio_unatt - [trails, time]
     return audio, eeg, audio_unatt
 
 
-def get_data(audio, eeg, audio_unatt=None, idx_sample=None, num_context=1, dct_params=None):
+def get_data(audio, eeg, audio_unatt=None, idx_sample=None, num_context=1, dct_params=None, STEP=20,
+             ONE_AUDIO_PER_SAMPLE=True, neg_label=0):
     """
     Select a sequence of audio, audio_unattnd, & eeg data Reshape the selected data into batch_size frames for prediction
 
@@ -62,7 +63,7 @@ def get_data(audio, eeg, audio_unatt=None, idx_sample=None, num_context=1, dct_p
         # Cat [X_eeg, X_audio], y = 1
         # Cat [X_eeg, X_audio_unatt], y = 0
 
-        num_time = a.size - num_context + 1  # how many slide windows
+        num_time =(a.size - num_context + 1) // STEP  # how many slide windows
         num_ch = e.shape[0]
 
         if idx_keep_audioTime is None:
@@ -75,8 +76,8 @@ def get_data(audio, eeg, audio_unatt=None, idx_sample=None, num_context=1, dct_p
         X_audio       = np.nan * np.ones((num_time, num_column_audio))
         X_audio_unatt = np.nan * np.ones((num_time, num_column_audio))
 
-        for idx in range(num_time):
-            idx_keep = np.arange(num_context) + idx
+        for idx in range(0, num_time):
+            idx_keep = np.arange(num_context) + (idx * STEP)
             for idx_ch in range(num_ch):
                 X_eeg[idx, idx_ch] = np.ravel(e[idx_ch, idx_keep])[idx_keep_audioTime]
             X_audio[idx] = np.ravel(a[idx_keep])[idx_keep_audioTime]
@@ -86,24 +87,40 @@ def get_data(audio, eeg, audio_unatt=None, idx_sample=None, num_context=1, dct_p
         # X_eeg - [num_time(windows), channel, idx_keep_audioTime]
         # X_audio/ X_audio_unatt - [num_time(windows), idx_keep_audioTime]
 
-        X1 = np.concatenate((X_eeg, X_audio), axis=1)
-        X0 = np.concatenate((X_eeg, X_audio_unatt), axis=1)
-        X = np.concatenate((X0, X1), axis=0)
-        y = np.concatenate((np.zeros((num_time, 1)), np.ones((num_time, 1))), axis=0)
-        # x - [num_time(windows) * 2, channel + 1, num_context\np.size(idx_keep_audioTime)]
-        # y - [num_time(windows) * 2, 1]
+        if ONE_AUDIO_PER_SAMPLE:
+            X1 = np.concatenate((X_eeg, X_audio), axis=1)
+            X0 = np.concatenate((X_eeg, X_audio_unatt), axis=1)
+            X = np.concatenate((X0, X1), axis=0)
+            y = np.concatenate((np.zeros(num_time) - neg_label, np.ones(num_time)))
+            # y = np.concatenate((np.zeros((num_time, 1)) - neg_label, np.ones((num_time, 1))), axis=0)
+            # x - [num_time(windows) * 2, channel + 1, num_context\np.size(idx_keep_audioTime)]
+            # y - [num_time(windows) * 2, 1]
 
-        X = Variable(torch.from_numpy(X).type('torch.FloatTensor'))
-        y = Variable(torch.from_numpy(np.array(y)).type('torch.FloatTensor'))
+            X = Variable(torch.from_numpy(X).type('torch.FloatTensor'))
+            y = Variable(torch.from_numpy(np.array(y)).type('torch.FloatTensor'))
+        else:
+            X = np.concatenate((X_eeg, X_audio), axis=1)
+            X = np.concatenate((X, X_audio_unatt), axis=1)
+            y = np.zeros((num_time, 1)) - neg_label
+
+            # switch audio channels for some samples
+            number_of_rows = X_audio.shape[0]
+            random_indices = np.sort(np.random.choice(number_of_rows, size=(number_of_rows // 2), replace=False))
+            X[random_indices, X_eeg.shape[1] + 1] = X_audio[random_indices, 0]
+            X[random_indices, X_eeg.shape[1]] = X_audio_unatt[random_indices, 0]
+            y[random_indices, 0] = 1
+
+            X = Variable(torch.from_numpy(X).type('torch.FloatTensor'))
+            y = Variable(torch.from_numpy(np.array(y)).type('torch.FloatTensor'))
     else:
         print('-warning, too little data-')
         X, y = None, None
     return X, y
 
 
-def prep_mat_file():
+def prep_mat_file(bade_adddr):
     dirs = ['s2']
-    folder = 'C:/Py_ws/DL/thesis/data/two_audio_selective/'
+    folder = bade_adddr + 'data/two_audio_selective/'
     for sbj in dirs:
         loaded_data_audio = scipy.io.loadmat(folder + sbj + "/pilotVR05_Smat")
         loaded_data_eeg = scipy.io.loadmat(folder + sbj + "/pilotVR05_Rmat.mat")
@@ -126,13 +143,13 @@ def prep_mat_file():
         mat_a  = {'data': data_a, 'data_unatt': data_au}
         mat_e  = {'data': data_e}
 
-        scipy.io.savemat('C:/Py_ws/DL/thesis/data/two_audio/' + sbj + '/Envelope.mat', mat_a)
-        scipy.io.savemat('C:/Py_ws/DL/thesis/data/two_audio/' + sbj + '/EEG.mat', mat_e)
+        scipy.io.savemat(bade_adddr + 'data/two_audio/' + sbj + '/Envelope.mat', mat_a)
+        scipy.io.savemat(bade_adddr + 'data/two_audio/' + sbj + '/EEG.mat', mat_e)
 
 
-def prep_mat_file_v2():
+def prep_mat_file_v2(bade_adddr):
     dirs = ['s2']
-    folder = 'C:/Py_ws/DL/thesis/data/two_audio_selective/'
+    folder = bade_adddr + 'data/two_audio_selective/'
     for sbj in dirs:
         filepath = folder + sbj + "/s2_r_s.mat"
         data_dict = mat73.loadmat(filepath)
@@ -156,15 +173,21 @@ def prep_mat_file_v2():
         scipy.io.savemat(folder + sbj + '/EEG.mat', mat_e)
 
 
-def short_prep_mat(filename):
+def short_prep_mat(filename, NORM):
     data_dict = mat73.loadmat(filename)
-    audio = data_dict['S_ds']
-    eeg = data_dict['R_ds']
+    if NORM:
+        audio = data_dict['S_zscore_ds']
+        eeg = data_dict['R_zscore_ds']
+    else:
+        audio = data_dict['S_ds']
+        eeg = data_dict['R_ds']
+
+    # separate audio to good audio and bad audio
     data_a, data_au = [], []
     for i, mat in enumerate(audio):
         data_a.append(mat[:, 0])
         data_au.append(mat[:, 1])
-
+    # transpose eeg from [time, channel] to [channel, time]
     data_e = []
     for i in range(len(eeg)):
         mat = eeg[i].transpose()
